@@ -1,6 +1,12 @@
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
 
 
+def _record_low_level_action_metrics(episode, stats):
+    for action_id in range(15):
+        metric_name = f"log_low_action_{action_id:02d}_ratio"
+        episode.custom_metrics[metric_name] = stats.get(f"low_action_{action_id:02d}_ratio", 0.0)
+
+
 class _BaseBattleCallbacks(DefaultCallbacks):
     def __init__(self):
         super().__init__()
@@ -20,6 +26,10 @@ class _BaseBattleCallbacks(DefaultCallbacks):
         episode.custom_metrics["log_counter"] = self.counter
         episode.custom_metrics["log_red_win_mean"] = self.red_win_counter / self.counter
         episode.custom_metrics["log_blue_win_mean"] = self.blue_win_counter / self.counter
+        decisive_counter = self.red_win_counter + self.blue_win_counter
+        episode.custom_metrics["log_red_win_no_draw_mean"] = (
+            self.red_win_counter / decisive_counter if decisive_counter else 0.0
+        )
         episode.custom_metrics["log_red_alive"] = red_alive
         episode.custom_metrics["log_blue_alive"] = blue_alive
         episode.custom_metrics["log_episode_length"] = episode.length
@@ -41,6 +51,7 @@ class AlgoCallbacks(_BaseBattleCallbacks):
         self._record_common_metrics(episode, winner, red_alive, blue_alive)
         episode.custom_metrics["log_attack_ratio"] = step_stats["attack_ratio"]
         episode.custom_metrics["log_evade_ratio"] = step_stats["evade_ratio"]
+        _record_low_level_action_metrics(episode, step_stats)
 
 
 class LowLevelCallbacks(_BaseBattleCallbacks):
@@ -60,3 +71,4 @@ class LowLevelCallbacks(_BaseBattleCallbacks):
         episode.custom_metrics["log_low_level_kill_events"] = low_level_stats.get("kill_events", 0)
         episode.custom_metrics["log_low_level_death_events"] = low_level_stats.get("death_events", 0)
         episode.custom_metrics["log_low_level_out_events"] = low_level_stats.get("out_events", 0)
+        _record_low_level_action_metrics(episode, low_level_stats)

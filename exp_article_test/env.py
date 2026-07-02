@@ -1,7 +1,7 @@
 import numpy as np
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 
-from exp_article_test.config import HRLConfig
+from exp_article_test.config import HRLConfig, SelfPlayConfig
 from exp_article_test.scene import BattleScene
 
 try:
@@ -26,6 +26,13 @@ class BattleEnv(MultiAgentEnv):
         self.use_script_low_level = env_config.get("use_script_low_level", HRLConfig["use_script_low_level"])
         self.low_level_policy_dir = env_config.get("low_level_policy_dir", HRLConfig["low_level_policy_dir"])
         self.freeze_low_level = env_config.get("freeze_low_level", HRLConfig["freeze_low_level"])
+        self.blue_policy_mode = env_config.get("blue_policy_mode", "script")
+        self.blue_opponent_checkpoint = env_config.get("blue_opponent_checkpoint", None)
+        self.opponent_pool_dir = env_config.get("opponent_pool_dir", SelfPlayConfig["opponent_pool_dir"])
+        self.opponent_sample_mode = env_config.get(
+            "opponent_sample_mode", SelfPlayConfig["opponent_sample_mode"]
+        )
+        self.fallback_to_script = env_config.get("fallback_to_script", SelfPlayConfig["fallback_to_script"])
 
         self.possible_agents = [f"red_{i}" for i in range(self.num_red)]
         self.agents = self.possible_agents[:]
@@ -40,6 +47,11 @@ class BattleEnv(MultiAgentEnv):
             use_script_low_level=self.use_script_low_level,
             low_level_policy_dir=self.low_level_policy_dir,
             freeze_low_level=self.freeze_low_level,
+            blue_policy_mode=self.blue_policy_mode,
+            blue_opponent_checkpoint=self.blue_opponent_checkpoint,
+            opponent_pool_dir=self.opponent_pool_dir,
+            opponent_sample_mode=self.opponent_sample_mode,
+            fallback_to_script=self.fallback_to_script,
         )
         self.observation_space = gym.spaces.Box(
             low=-10.0,

@@ -210,7 +210,13 @@ class LowLevelBattleEnv(MultiAgentEnv):
         self.prev_red_alive = self.num_red
         self.prev_blue_alive = self.num_blue
         self.last_rewards = {}
-        self.episode_stats = {"mode": self.mode, "kill_events": 0, "death_events": 0, "out_events": 0}
+        self.episode_stats = {
+            "mode": self.mode,
+            "kill_events": 0,
+            "death_events": 0,
+            "out_events": 0,
+            "low_action_counts": [0] * 15,
+        }
         self._assign_targets()
         self.prev_status = self._snapshot_status()
         self._snapshot_distances()
@@ -225,6 +231,7 @@ class LowLevelBattleEnv(MultiAgentEnv):
         self.prev_blue_alive = self.bf.num_blue_alive
         self._snapshot_distances()
         blue_actions = make_decision_for_blue_team(self.bf) if self.use_blue_script else {}
+        self._record_low_level_actions(action_dict)
         self.bf.step(action_dict, blue_actions)
         self._assign_targets()
         self.last_rewards = self._build_rewards()
@@ -300,6 +307,13 @@ class LowLevelBattleEnv(MultiAgentEnv):
                 candidates = select_candidate_targets(red, self.bf, top_k=1)
                 target = candidates[0] if candidates else None
             self.assigned_targets[agent_id] = None if target is None else target.id
+
+    def _record_low_level_actions(self, action_dict):
+        action_counts = self.episode_stats.setdefault("low_action_counts", [0] * 15)
+        for action in action_dict.values():
+            action_id = int(action)
+            if 0 <= action_id < 15:
+                action_counts[action_id] += 1
 
     def _build_rewards(self):
         start_red_alive = self.prev_red_alive
@@ -391,7 +405,13 @@ class LowLevelBattleEnv(MultiAgentEnv):
         return self.bf.battlefield_info, self.bf.num_red_alive, self.bf.num_blue_alive
 
     def call_back_low_level_stats(self):
-        return dict(self.episode_stats)
+        stats = dict(self.episode_stats)
+        action_counts = stats.get("low_action_counts", [0] * 15)
+        total_actions = sum(action_counts)
+        for action_id, count in enumerate(action_counts):
+            stats[f"low_action_{action_id:02d}_ratio"] = count / total_actions if total_actions else 0.0
+            stats[f"low_action_{action_id:02d}_count"] = count
+        return stats
 
     def call_back_save_data(self):
         self.bf.save_data()

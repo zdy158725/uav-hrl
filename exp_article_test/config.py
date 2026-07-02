@@ -49,11 +49,57 @@ HRLConfig = {
     "reward_lose": -30.0,
     "reward_out": -5.0,
     "reward_action_assess": 0.2,
-    "start_train_num_red": 2,
-    "start_train_num_blue": 2,
+    "reward_attack_adv_match": 0.50,
+    "reward_evade_threat_match": 1.50,
+    "reward_attack_under_threat_penalty": -1.50,
+    "reward_evade_safe_penalty": -0.30,
+    "reward_evade_threat_delta": 1.50,
+    "reward_attack_adv_delta": 0.50,
+    "attack_adv_threshold": 0.0,
+    "evade_threat_threshold": 0.05,
+    "attack_under_threat_threshold": 0.15,
+    "start_train_num_red": 3,
+    "start_train_num_blue": 3,
     "use_script_low_level": True,
     "low_level_policy_dir": str(OUTPUT_DIR / "policies"),
     "freeze_low_level": True,
+}
+
+BlueScriptConfig = {
+    "use_improved_blue_script": True,
+    "blue_evade_blood_threshold": 0.35,
+    "blue_evade_threat_adv_threshold": 0.10,
+    "blue_evade_adv_margin": 0.25,
+    "blue_target_assign_penalty": 0.60,
+    "blue_low_blood_bonus": 0.50,
+    "blue_distance_score_scale": 3000.0,
+    "blue_close_threat_distance": 600.0,
+}
+
+SelfPlayConfig = {
+    "use_self_play_blue": True,
+    "opponent_pool_dir": str(OUTPUT_DIR / "self_play" / "opponent_pool"),
+    "opponent_sample_mode": "latest_or_random",
+    "bootstrap_with_script_iters": 0,
+    "snapshot_interval": 20,
+    "max_opponents": 10,
+    "fallback_to_script": True,
+}
+
+TrajectoryPlotConfig = {
+    "auto_plot_after_training": True,
+    "num_episodes": 5,
+    "max_steps": 120,
+    "seed_start": 0,
+}
+
+FixedEvaluationConfig = {
+    "auto_evaluate_after_training": True,
+    "recent_checkpoint_count": 4,
+    "episodes_per_matchup": 200,
+    "max_steps": 120,
+    "seed": 20260625,
+    "opponents": ("script", "initial_policy"),
 }
 
 LowLevelConfig = {

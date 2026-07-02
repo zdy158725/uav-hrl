@@ -1,6 +1,6 @@
 import numpy as np
 
-from exp_article_test.config import HRLConfig, UAVConfig
+from exp_article_test.config import BlueScriptConfig, HRLConfig, UAVConfig
 from exp_article_test.toolkit import get_rela_angle
 
 
@@ -180,6 +180,82 @@ def select_candidate_targets(uav, bf, top_k=None):
     return [target for target, _ in candidates[:top_k]]
 
 
+def get_script_advantage(attacker, target):
+    rel = target.pos - attacker.pos
+    dist = np.linalg.norm(rel)
+    my_angle = get_rela_angle(attacker.vel, rel)
+    target_angle = get_rela_angle(target.vel, -rel)
+    dist_score = np.exp(-max(0.0, dist - 1000.0) / BlueScriptConfig["blue_distance_score_scale"])
+    angle_score = 1.0 - (my_angle / np.pi)
+    pressure = 1.0 - (target_angle / np.pi)
+    return angle_score * dist_score - pressure
+
+
+def _alive_enemy_team(uav, bf):
+    target_team = bf.blue_uav if uav.team == "Red" else bf.red_uav
+    return [target for target in target_team if target.alive]
+
+
+def select_most_dangerous_threat(uav, bf):
+    threats = _alive_enemy_team(uav, bf)
+    if not threats:
+        return None, 0.0
+    scored_threats = [(threat, get_script_advantage(threat, uav)) for threat in threats]
+    return max(scored_threats, key=lambda item: item[1])
+
+
+def _nearest_enemy_distance(uav, bf):
+    enemies = _alive_enemy_team(uav, bf)
+    if not enemies:
+        return float("inf")
+    return min(np.linalg.norm(enemy.pos - uav.pos) for enemy in enemies)
+
+
+def select_coordinated_script_target(blue, bf, assigned_counts):
+    candidates = _alive_enemy_team(blue, bf)
+    if not candidates:
+        return None
+
+    best_target = None
+    best_score = -float("inf")
+    for target in candidates:
+        dist = np.linalg.norm(target.pos - blue.pos)
+        dist_score = np.exp(
+            -max(0.0, dist - 1000.0) / BlueScriptConfig["blue_distance_score_scale"]
+        )
+        assigned_count = assigned_counts.get(target.id, 0)
+        score = (
+            1.2 * get_script_advantage(blue, target)
+            + 0.8 * dist_score
+            + BlueScriptConfig["blue_low_blood_bonus"] * (1.0 - target.blood)
+            - BlueScriptConfig["blue_target_assign_penalty"] * assigned_count
+        )
+        if score > best_score:
+            best_score = score
+            best_target = target
+    return best_target
+
+
+def should_blue_evade(blue, target, threat, bf):
+    if threat is None:
+        return False
+
+    threat_adv = get_script_advantage(threat, blue)
+    attack_adv = get_script_advantage(blue, target) if target is not None else -1.0
+    nearest_dist = _nearest_enemy_distance(blue, bf)
+
+    if (
+        blue.blood < BlueScriptConfig["blue_evade_blood_threshold"]
+        and threat_adv > BlueScriptConfig["blue_evade_threat_adv_threshold"]
+    ):
+        return True
+    if threat_adv - attack_adv > BlueScriptConfig["blue_evade_adv_margin"]:
+        return True
+    if nearest_dist < BlueScriptConfig["blue_close_threat_distance"] and threat_adv > 0.0:
+        return True
+    return False
+
+
 def option_attack(uav, target, bf):
     del bf
     if target is None or not target.alive:
@@ -221,7 +297,7 @@ def lock_blue_target(uav, bf):
     return candidates[0].id if candidates else -1
 
 
-def make_decision_for_blue_team(bf):
+def make_basic_decision_for_blue_team(bf):
     blue_actions = {}
     for blue in bf.blue_uav:
         if not blue.alive:
@@ -233,6 +309,41 @@ def make_decision_for_blue_team(bf):
         cont_action = pursuit_script_action(blue, candidates[0])
         blue_actions[f"blue_{blue.id}"] = select_discrete_action(cont_action)
     return blue_actions
+
+
+def make_improved_decision_for_blue_team(bf):
+    blue_actions = {}
+    assigned_counts = {}
+    alive_blues = [blue for blue in bf.blue_uav if blue.alive]
+
+    for blue in sorted(alive_blues, key=lambda item: item.blood):
+        target = select_coordinated_script_target(blue, bf, assigned_counts)
+        threat, _ = select_most_dangerous_threat(blue, bf)
+
+        if target is None and threat is None:
+            blue_actions[f"blue_{blue.id}"] = 0
+            continue
+
+        if should_blue_evade(blue, target, threat, bf):
+            cont_action = evade_script_action(blue, threat)
+            blue_actions[f"blue_{blue.id}"] = select_discrete_action(cont_action)
+            continue
+
+        if target is None:
+            blue_actions[f"blue_{blue.id}"] = 0
+            continue
+
+        cont_action = pursuit_script_action(blue, target)
+        blue_actions[f"blue_{blue.id}"] = select_discrete_action(cont_action)
+        assigned_counts[target.id] = assigned_counts.get(target.id, 0) + 1
+
+    return blue_actions
+
+
+def make_decision_for_blue_team(bf):
+    if BlueScriptConfig.get("use_improved_blue_script", True):
+        return make_improved_decision_for_blue_team(bf)
+    return make_basic_decision_for_blue_team(bf)
 
 
 def make_decision_for_red_team(bf):

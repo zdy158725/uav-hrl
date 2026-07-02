@@ -202,11 +202,11 @@ class BattleField:
             self.record[uav.team][uav.id]['damage'] = 0.0
             return
 
-        # 3) 伤害系数（你原来就是红×2.5、蓝×0.8）
+        # 3) 伤害系数。当前保持红蓝 1:1，避免胜率受阵营伤害倍率影响。
         if uav.team == "Red":
-            best_damage *= 2.5
+            best_damage *= 1.0
         else:
-            best_damage *= 0.8
+            best_damage *= 1.0
 
         # 4) 结算到被打的那架机上
         uav.set_target(best_target.id)
