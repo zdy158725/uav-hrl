@@ -1,8 +1,10 @@
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
 
+from exp_article_test.maneuver import ACTION_COUNT
+
 
 def _record_low_level_action_metrics(episode, stats):
-    for action_id in range(15):
+    for action_id in range(ACTION_COUNT):
         metric_name = f"log_low_action_{action_id:02d}_ratio"
         episode.custom_metrics[metric_name] = stats.get(f"low_action_{action_id:02d}_ratio", 0.0)
 

@@ -12,6 +12,7 @@ except ModuleNotFoundError:
 from exp_article_test.battlefield import BattleField
 from exp_article_test.config import LowLevelConfig
 from exp_article_test.maneuver import (
+    ACTION_COUNT,
     make_decision_for_blue_team,
     option_attack,
     option_evade,
@@ -154,6 +155,11 @@ class LowLevelController:
                 [],
                 None,
             )
+        if logits.shape[-1] != ACTION_COUNT:
+            raise ValueError(
+                f"Low-level {mode} policy outputs {logits.shape[-1]} actions, "
+                f"but the current action library has {ACTION_COUNT}; use a 15-action policy."
+            )
         return int(torch.argmax(logits[0]).item())
 
     def infer_action(self, mode, uav, bf, target=None):
@@ -176,12 +182,29 @@ class LowLevelBattleEnv(MultiAgentEnv):
         self.num_red = env_config.get("num_red", LowLevelConfig["start_train_num_red"])
         self.num_blue = env_config.get("num_blue", LowLevelConfig["start_train_num_blue"])
         self.use_blue_script = env_config.get("use_blue_script", True)
+        self.blue_policy_mode = env_config.get("blue_policy_mode", "script")
         self.threat_count = env_config.get("threat_count", LowLevelConfig["threat_count"])
 
         self.possible_agents = [f"red_{i}" for i in range(self.num_red)]
         self.agents = self.possible_agents[:]
         self._agent_ids = set(self.possible_agents)
-        self.bf = BattleField(self.num_red, self.num_blue)
+        self.blue_scene = None
+        if self.blue_policy_mode == "history_policy":
+            from exp_article_test.scene import BattleScene
+
+            self.blue_scene = BattleScene(
+                self.num_red, self.num_blue,
+                use_script_low_level=True,
+                low_level_policy_dir=env_config.get("blue_low_level_policy_dir"),
+                blue_low_level_policy_dir=env_config.get("blue_low_level_policy_dir"),
+                blue_high_level_sub_steps=env_config.get("blue_high_level_sub_steps", 1),
+                blue_policy_mode="history_policy",
+                blue_opponent_checkpoint=env_config.get("blue_opponent_checkpoint"),
+                fallback_to_script=False,
+            )
+            self.bf = self.blue_scene.bf
+        else:
+            self.bf = BattleField(self.num_red, self.num_blue)
         self.assigned_targets = {}
         self.prev_status = {}
         self.prev_distances = {}
@@ -197,14 +220,17 @@ class LowLevelBattleEnv(MultiAgentEnv):
 
         obs_dim = LowLevelConfig["attack_obs_dim"] if self.mode == "attack" else LowLevelConfig["evade_obs_dim"]
         self.observation_space = gym.spaces.Box(low=-10.0, high=10.0, shape=(obs_dim,), dtype=np.float32)
-        self.action_space = gym.spaces.Discrete(15)
+        self.action_space = gym.spaces.Discrete(ACTION_COUNT)
         self.observation_spaces = {agent: self.observation_space for agent in self.agents}
         self.action_spaces = {agent: self.action_space for agent in self.agents}
         super().__init__()
 
     def reset(self, *, seed=None, options=None):
         del seed, options
-        self.bf.reset()
+        if self.blue_scene is not None:
+            self.blue_scene.reset()
+        else:
+            self.bf.reset()
         self.assigned_targets = {}
         self.prev_distances = {}
         self.prev_red_alive = self.num_red
@@ -215,7 +241,7 @@ class LowLevelBattleEnv(MultiAgentEnv):
             "kill_events": 0,
             "death_events": 0,
             "out_events": 0,
-            "low_action_counts": [0] * 15,
+            "low_action_counts": [0] * ACTION_COUNT,
         }
         self._assign_targets()
         self.prev_status = self._snapshot_status()
@@ -230,9 +256,30 @@ class LowLevelBattleEnv(MultiAgentEnv):
         self.prev_red_alive = self.bf.num_red_alive
         self.prev_blue_alive = self.bf.num_blue_alive
         self._snapshot_distances()
-        blue_actions = make_decision_for_blue_team(self.bf) if self.use_blue_script else {}
+        if self.blue_scene is not None:
+            blue_actions, blue_attack_agent_ids, blue_attack_targets = self.blue_scene._make_blue_actions()
+        elif self.use_blue_script:
+            blue_actions, blue_attack_agent_ids, blue_attack_targets = make_decision_for_blue_team(
+                self.bf, return_targets=True,
+            )
+        else:
+            blue_actions, blue_attack_agent_ids, blue_attack_targets = {}, set(), {}
+        red_attack_targets = {}
+        if self.mode == "attack":
+            for red in self.bf.red_uav:
+                agent_id = f"red_{red.id}"
+                if red.alive and agent_id in action_dict:
+                    target = self._current_target(red)
+                    if target is not None:
+                        red_attack_targets[agent_id] = target.id
+        red_attack_agent_ids = set(red_attack_targets)
         self._record_low_level_actions(action_dict)
-        self.bf.step(action_dict, blue_actions)
+        self.bf.step(
+            action_dict,
+            blue_actions,
+            attack_agent_ids=red_attack_agent_ids | blue_attack_agent_ids,
+            attack_targets={**red_attack_targets, **blue_attack_targets},
+        )
         self._assign_targets()
         self.last_rewards = self._build_rewards()
         obs = self.observation()
@@ -309,10 +356,10 @@ class LowLevelBattleEnv(MultiAgentEnv):
             self.assigned_targets[agent_id] = None if target is None else target.id
 
     def _record_low_level_actions(self, action_dict):
-        action_counts = self.episode_stats.setdefault("low_action_counts", [0] * 15)
+        action_counts = self.episode_stats.setdefault("low_action_counts", [0] * ACTION_COUNT)
         for action in action_dict.values():
             action_id = int(action)
-            if 0 <= action_id < 15:
+            if 0 <= action_id < ACTION_COUNT:
                 action_counts[action_id] += 1
 
     def _build_rewards(self):
@@ -406,7 +453,7 @@ class LowLevelBattleEnv(MultiAgentEnv):
 
     def call_back_low_level_stats(self):
         stats = dict(self.episode_stats)
-        action_counts = stats.get("low_action_counts", [0] * 15)
+        action_counts = stats.get("low_action_counts", [0] * ACTION_COUNT)
         total_actions = sum(action_counts)
         for action_id, count in enumerate(action_counts):
             stats[f"low_action_{action_id:02d}_ratio"] = count / total_actions if total_actions else 0.0

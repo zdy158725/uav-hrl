@@ -2,7 +2,7 @@ import numpy as np
 
 from exp_article_test.battlefield import BattleField
 from exp_article_test.config import HRLConfig
-from exp_article_test.maneuver import build_low_level_action, make_decision_for_blue_team, select_candidate_targets
+from exp_article_test.maneuver import ACTION_COUNT, build_low_level_action, make_decision_for_blue_team, option_attack, select_candidate_targets
 from exp_article_test.low_level_env import LowLevelController
 from exp_article_test.self_play import HistoryPolicyOpponent
 from exp_article_test.toolkit import get_rela_angle
@@ -24,6 +24,8 @@ class BattleScene(object):
         opponent_pool_dir=None,
         opponent_sample_mode="latest_or_random",
         fallback_to_script=True,
+        blue_low_level_policy_dir=None,
+        blue_high_level_sub_steps=1,
     ):
         self.bf = BattleField(num_red, num_blue)
         self.candidate_enemy_count = candidate_enemy_count or HRLConfig["candidate_enemy_count"]
@@ -35,6 +37,11 @@ class BattleScene(object):
         self.low_level_policy_dir = low_level_policy_dir or HRLConfig["low_level_policy_dir"]
         self.freeze_low_level = HRLConfig["freeze_low_level"] if freeze_low_level is None else freeze_low_level
         self.blue_policy_mode = blue_policy_mode
+        self.blue_high_level_sub_steps = int(blue_high_level_sub_steps)
+        if self.blue_high_level_sub_steps < 1:
+            raise ValueError("blue_high_level_sub_steps must be positive")
+        self.blue_macro_elapsed = 0
+        self.blue_macro_choices = {}
         self.fallback_to_script = fallback_to_script
 
         self.self_obs_dim = 8
@@ -48,13 +55,19 @@ class BattleScene(object):
         self.action_dim = self.candidate_enemy_count + 1
 
         self.last_rewards = {}
-        self.step_stats = {"attack_count": 0, "evade_count": 0, "low_action_counts": [0] * 15}
-        self.episode_stats = {"attack_count": 0, "evade_count": 0, "low_action_counts": [0] * 15}
+        self.step_stats = {"attack_count": 0, "evade_count": 0, "low_action_counts": [0] * ACTION_COUNT}
+        self.episode_stats = {"attack_count": 0, "evade_count": 0, "low_action_counts": [0] * ACTION_COUNT}
         self.low_level_controller = LowLevelController(
             use_script=self.use_script_low_level,
             policy_dir=self.low_level_policy_dir,
             device="cpu",
         )
+        self.blue_low_level_controller = (
+            LowLevelController(use_script=False, policy_dir=blue_low_level_policy_dir, device="cpu")
+            if blue_low_level_policy_dir is not None else self.low_level_controller
+        )
+        if blue_low_level_policy_dir is not None and set(self.blue_low_level_controller.models) != {"attack", "evade"}:
+            raise FileNotFoundError(f"Blue opponent requires attack and evade policies in {blue_low_level_policy_dir}")
         self.history_opponent = None
         if self.blue_policy_mode == "history_policy":
             self.history_opponent = HistoryPolicyOpponent(
@@ -66,18 +79,20 @@ class BattleScene(object):
 
     def reset(self):
         self.bf.reset()
+        self.blue_macro_elapsed = 0
+        self.blue_macro_choices = {}
         self.last_rewards = {
             f"red_{uav.id}": 0.0
             for uav in self.bf.red_uav
             if uav.alive
         }
-        self.step_stats = {"attack_count": 0, "evade_count": 0, "low_action_counts": [0] * 15}
-        self.episode_stats = {"attack_count": 0, "evade_count": 0, "low_action_counts": [0] * 15}
+        self.step_stats = {"attack_count": 0, "evade_count": 0, "low_action_counts": [0] * ACTION_COUNT}
+        self.episode_stats = {"attack_count": 0, "evade_count": 0, "low_action_counts": [0] * ACTION_COUNT}
         if self.history_opponent is not None:
             self.history_opponent.resample()
 
     def step(self, macro_actions):
-        self.step_stats = {"attack_count": 0, "evade_count": 0, "low_action_counts": [0] * 15}
+        self.step_stats = {"attack_count": 0, "evade_count": 0, "low_action_counts": [0] * ACTION_COUNT}
         start_red_alive = self.bf.num_red_alive
         start_blue_alive = self.bf.num_blue_alive
         prev_status = {
@@ -86,11 +101,18 @@ class BattleScene(object):
         }
 
         shaped_rewards, assessment_context = self._action_assessment(macro_actions)
+        locked_red_targets = {
+            agent_id: context["start_attack_target_id"]
+            for agent_id, context in assessment_context.items()
+            if context["macro_action"] > 0 and context["start_attack_target_id"] is not None
+        }
         executed_terms = {}
 
         for _ in range(self.sub_steps):
             red_actions = {}
-            blue_actions = self._make_blue_actions()
+            red_attack_agent_ids = set()
+            red_attack_targets = {}
+            blue_actions, blue_attack_agent_ids, blue_attack_targets = self._make_blue_actions()
             executed_terms = {}
 
             for red in self.bf.red_uav:
@@ -100,18 +122,26 @@ class BattleScene(object):
                 macro_action = int(macro_actions.get(agent_id, 0))
                 mode = 0 if macro_action <= 0 else 1
                 target_idx = max(0, macro_action - 1)
+                locked_target_id = locked_red_targets.get(agent_id)
+                locked_target = self._find_uav_by_id("Blue", locked_target_id)
+                if locked_target is not None and not locked_target.alive:
+                    locked_target = None
                 low_level_action, target = self.infer_low_level_action(
-                    mode=mode,
+                    mode=mode if locked_target is not None else 0,
                     target_idx=target_idx,
                     uav=red,
+                    target=locked_target,
                 )
                 red_actions[agent_id] = int(low_level_action)
-                if 0 <= int(low_level_action) < 15:
+                if mode > 0 and target is not None:
+                    red_attack_agent_ids.add(agent_id)
+                    red_attack_targets[agent_id] = target.id
+                if 0 <= int(low_level_action) < ACTION_COUNT:
                     self.step_stats["low_action_counts"][int(low_level_action)] += 1
                     self.episode_stats["low_action_counts"][int(low_level_action)] += 1
                 executed_terms[agent_id] = {
                     "macro_mode": mode,
-                    "macro_target": None if target is None else target.id,
+                    "macro_target": locked_target_id,
                 }
 
                 if mode == 0:
@@ -123,10 +153,15 @@ class BattleScene(object):
 
                 red_record = self.bf.record["Red"][red.id]
                 red_record["macro_mode"] = mode
-                red_record["macro_target"] = None if target is None else target.id
+                red_record["macro_target"] = locked_target_id
 
             if red_actions:
-                self.bf.step(red_actions, blue_actions)
+                self.bf.step(
+                    red_actions,
+                    blue_actions,
+                    attack_agent_ids=red_attack_agent_ids | blue_attack_agent_ids,
+                    attack_targets={**red_attack_targets, **blue_attack_targets},
+                )
             else:
                 self.bf.check_winner()
 
@@ -354,7 +389,12 @@ class BattleScene(object):
                     np.clip(delta, -1.0, 1.0)
                 )
 
-    def infer_low_level_action(self, mode, target_idx, uav):
+    def infer_low_level_action(self, mode, target_idx, uav, target=None):
+        if mode > 0 and target is not None:
+            if self.use_script_low_level:
+                return option_attack(uav, target, self.bf), target
+            action = self.low_level_controller.infer_action("attack", uav, self.bf, target=target)
+            return action, target
         if self.use_script_low_level:
             return build_low_level_action(
                 mode=mode,
@@ -379,40 +419,64 @@ class BattleScene(object):
 
     def _make_blue_actions(self):
         if not self.use_blue_script:
-            return {}
+            return {}, set(), {}
         if self.blue_policy_mode != "history_policy":
-            return make_decision_for_blue_team(self.bf)
+            return make_decision_for_blue_team(self.bf, return_targets=True)
         history_actions = self._make_history_policy_blue_actions()
         if history_actions is not None:
             return history_actions
         if self.fallback_to_script:
-            return make_decision_for_blue_team(self.bf)
-        return {}
+            return make_decision_for_blue_team(self.bf, return_targets=True)
+        return {}, set(), {}
 
     def _make_history_policy_blue_actions(self):
         if self.history_opponent is None:
             return None
 
         blue_actions = {}
+        blue_attack_agent_ids = set()
+        blue_attack_targets = {}
+        refresh = self.blue_macro_elapsed % self.blue_high_level_sub_steps == 0
         for blue in self.bf.blue_uav:
             if not blue.alive:
                 continue
-            macro_action = self.history_opponent.compute_action(self.get_high_level_obs(blue))
-            if macro_action is None:
-                return None
-            macro_action = int(np.clip(macro_action, 0, self.action_dim - 1))
+            if refresh or blue.id not in self.blue_macro_choices:
+                macro_action = self.history_opponent.compute_action(self.get_high_level_obs(blue))
+                if macro_action is None:
+                    return None
+                macro_action = int(np.clip(macro_action, 0, self.action_dim - 1))
+                candidates = select_candidate_targets(blue, self.bf, top_k=self.candidate_enemy_count)
+                target_idx = max(0, macro_action - 1)
+                target_id = (
+                    candidates[min(target_idx, len(candidates) - 1)].id
+                    if macro_action > 0 and candidates else None
+                )
+                self.blue_macro_choices[blue.id] = (macro_action, target_id)
+            else:
+                macro_action, target_id = self.blue_macro_choices[blue.id]
             mode = 0 if macro_action <= 0 else 1
-            target_idx = max(0, macro_action - 1)
-            low_level_action, target = self.infer_low_level_action(
-                mode=mode,
-                target_idx=target_idx,
-                uav=blue,
-            )
-            blue_actions[f"blue_{blue.id}"] = int(low_level_action)
+            if self.blue_low_level_controller is self.low_level_controller:
+                low_level_action, target = self.infer_low_level_action(
+                    mode=mode, target_idx=max(0, macro_action - 1), uav=blue,
+                )
+            else:
+                target = self._find_uav_by_id("Red", target_id) if mode > 0 else None
+                if target is not None and not target.alive:
+                    target = None
+                selected_mode = "attack" if target is not None else "evade"
+                low_level_action = self.blue_low_level_controller.infer_action(
+                    selected_mode, blue, self.bf, target=target,
+                )
+            agent_id = f"blue_{blue.id}"
+            blue_actions[agent_id] = int(low_level_action)
+            if mode > 0 and target is not None:
+                blue_attack_agent_ids.add(agent_id)
+                blue_attack_targets[agent_id] = target.id
             blue_record = self.bf.record["Blue"][blue.id]
             blue_record["macro_mode"] = mode
             blue_record["macro_target"] = None if target is None else target.id
-        return blue_actions
+        self.blue_macro_elapsed += 1
+        return blue_actions, blue_attack_agent_ids, blue_attack_targets
 
     def _build_rewards(self, macro_actions, shaped_rewards, prev_status, start_red_alive, start_blue_alive, executed_terms):
         rewards = {}
@@ -451,7 +515,7 @@ class BattleScene(object):
 
     def get_episode_stats(self):
         total_actions = self.episode_stats["attack_count"] + self.episode_stats["evade_count"]
-        low_action_counts = self.episode_stats.get("low_action_counts", [0] * 15)
+        low_action_counts = self.episode_stats.get("low_action_counts", [0] * ACTION_COUNT)
         total_low_actions = sum(low_action_counts)
         stats = {
             "attack_ratio": self.episode_stats["attack_count"] / total_actions if total_actions else 0.0,

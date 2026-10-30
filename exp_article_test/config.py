@@ -24,6 +24,8 @@ BattleFieldConfig = {
     "max_simulation_time": 500.0,
     "decision_separation": 10,
     "crash_distance": 15.0,
+    "fire_cooldown_seconds": 0.5,
+    "evade_damage_multiplier": 0.5,
     "boundary_x_min": 0,
     "boundary_x_max": 16000,
     "boundary_y_min": 0,
@@ -41,7 +43,7 @@ PathConfig = {
 
 HRLConfig = {
     "candidate_enemy_count": 2,
-    "sub_steps": 10,
+    "sub_steps": 2,
     "high_level_mode_count": 3,
     "reward_kill": 10.0,
     "reward_dead": -10.0,
@@ -89,7 +91,7 @@ SelfPlayConfig = {
 TrajectoryPlotConfig = {
     "auto_plot_after_training": True,
     "num_episodes": 5,
-    "max_steps": 120,
+    "max_steps": 251,
     "seed_start": 0,
 }
 
@@ -97,7 +99,7 @@ FixedEvaluationConfig = {
     "auto_evaluate_after_training": True,
     "recent_checkpoint_count": 4,
     "episodes_per_matchup": 200,
-    "max_steps": 120,
+    "max_steps": 251,
     "seed": 20260625,
     "opponents": ("script", "initial_policy"),
 }

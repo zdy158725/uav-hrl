@@ -23,14 +23,13 @@ from matplotlib.font_manager import FontProperties
 
 from exp_article_test.config import LowLevelConfig
 from exp_article_test.low_level_env import LowLevelBattleEnv, get_uav_advantage
-from exp_article_test.maneuver import option_attack, option_evade, select_candidate_targets
+from exp_article_test.maneuver import ACTION_COUNT, option_attack, option_evade, select_candidate_targets
 from exp_article_test.toolkit import get_rela_angle
 
 
 FONT_PATH = Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
 CN_FONT = FontProperties(fname=str(FONT_PATH)) if FONT_PATH.exists() else None
 POLICY_ID = "low_policy"
-ACTION_COUNT = 15
 
 
 def _set_seed(seed: int) -> None:
@@ -185,13 +184,13 @@ def _mean_tracker_delta(trackers: dict, key: str) -> float:
     return float(np.mean(deltas)) if deltas else 0.0
 
 
-def _normalized_action_entropy(action_counts: np.ndarray) -> float:
+def _normalized_action_entropy(action_counts: np.ndarray, action_space_n: int) -> float:
     total = int(action_counts.sum())
     if total <= 0:
         return 0.0
     probabilities = action_counts[action_counts > 0] / total
     entropy = -float(np.sum(probabilities * np.log(probabilities)))
-    return entropy / math.log(ACTION_COUNT)
+    return entropy / math.log(action_space_n)
 
 
 def _run_episode(
@@ -277,6 +276,7 @@ def _run_episode(
     decisive = winner in {"red", "blue"}
     total_actions = int(action_counts.sum())
     state_count = int(aggregate["state_count"])
+    action_space_n = int(policy.action_space.n) if policy is not None else ACTION_COUNT
     return {
         "seed": seed,
         "winner": winner,
@@ -304,7 +304,8 @@ def _run_episode(
             if aggregate["attack_window_total"]
             else 0.0
         ),
-        "action_entropy": _normalized_action_entropy(action_counts),
+        "action_space_n": action_space_n,
+        "action_entropy": _normalized_action_entropy(action_counts, action_space_n),
         "max_action_ratio": float(action_counts.max() / total_actions) if total_actions else 0.0,
         **{
             f"action_{action_id:02d}_ratio": (
@@ -335,6 +336,7 @@ def _summarize(mode: str, controller: str, checkpoint: str, rows: list[dict]) ->
         "mode": mode,
         "controller": controller,
         "checkpoint": checkpoint,
+        "action_space_n": int(rows[0]["action_space_n"]) if rows else ACTION_COUNT,
         "training_iteration": _checkpoint_iteration(Path(checkpoint)) if checkpoint else -1,
         "episodes": episodes,
         "decisive_episodes": decisive,

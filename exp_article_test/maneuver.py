@@ -4,42 +4,36 @@ from exp_article_test.config import BlueScriptConfig, HRLConfig, UAVConfig
 from exp_article_test.toolkit import get_rela_angle
 
 
+BASE_BANK = float(np.arccos(2.0 / 7.0))
+
+
+def _build_action_library():
+    actions = [
+        (0.0, 1.0, 0.0), (4.0, 1.0, 0.0), (-4.0, 1.0, 0.0),
+        (0.0, 7.0, 0.0), (4.0, 7.0, 0.0), (-4.0, 7.0, 0.0),
+        (0.0, -5.0, 0.0), (4.0, -5.0, 0.0), (-4.0, -5.0, 0.0),
+        (0.0, 7.0, BASE_BANK), (4.0, 7.0, BASE_BANK), (-4.0, 7.0, BASE_BANK),
+        (0.0, 7.0, -BASE_BANK), (4.0, 7.0, -BASE_BANK), (-4.0, 7.0, -BASE_BANK),
+    ]
+    return np.asarray(actions, dtype=float)
+
+
+ACTION_LIBRARY = _build_action_library()
+ACTION_COUNT = len(ACTION_LIBRARY)
+
+
 def convert_to_contol_input(rl_action):
-    if rl_action == 0:
-        return np.array([0.0, 1.0, 0.0])
-    if rl_action == 1:
-        return np.array([4.0, 1.0, 0.0])
-    if rl_action == 2:
-        return np.array([-4.0, 1.0, 0.0])
-    if rl_action == 3:
-        return np.array([0.0, 7.0, 0.0])
-    if rl_action == 4:
-        return np.array([4.0, 7.0, 0.0])
-    if rl_action == 5:
-        return np.array([-4.0, 7.0, 0.0])
-    if rl_action == 6:
-        return np.array([0.0, -5.0, 0.0])
-    if rl_action == 7:
-        return np.array([4.0, -5.0, 0.0])
-    if rl_action == 8:
-        return np.array([-4.0, -5.0, 0.0])
-    if rl_action == 9:
-        return np.array([0.0, 7.0, np.arccos(2 / 7)])
-    if rl_action == 10:
-        return np.array([4.0, 7.0, np.arccos(2 / 7)])
-    if rl_action == 11:
-        return np.array([-4.0, 7.0, np.arccos(2 / 7)])
-    if rl_action == 12:
-        return np.array([0.0, 7.0, -np.arccos(2 / 7)])
-    if rl_action == 13:
-        return np.array([4.0, 7.0, -np.arccos(2 / 7)])
-    if rl_action == 14:
-        return np.array([-4.0, 7.0, -np.arccos(2 / 7)])
-    raise ValueError(f"Unsupported discrete action: {rl_action}")
+    try:
+        action_index = int(rl_action)
+    except (TypeError, ValueError):
+        raise ValueError(f"Unsupported discrete action: {rl_action}") from None
+    if action_index != rl_action or not 0 <= action_index < ACTION_COUNT:
+        raise ValueError(f"Unsupported discrete action: {rl_action}")
+    return ACTION_LIBRARY[action_index].copy()
 
 
 def make_action_array():
-    return [convert_to_contol_input(i) for i in range(15)]
+    return [action.copy() for action in ACTION_LIBRARY]
 
 
 def estimate_status(uav, action):
@@ -66,7 +60,6 @@ def estimate_status(uav, action):
 ATTACK_CONE_ANGLE = np.pi / 6
 MAX_NX = UAVConfig.get("nx_max", 4.0)
 MAX_NN = UAVConfig.get("nn_max", 7.0)
-BASE_BANK = np.arccos(2.0 / 7.0)
 
 
 def _desired_heading_to_position(uav, position):
@@ -131,9 +124,8 @@ def evade_script_action(uav, threat):
 
 
 def select_discrete_action(cont_action):
-    action_array = make_action_array()
-    cont_action = np.array(cont_action)
-    distances = [np.linalg.norm(cont_action - a) for a in action_array]
+    cont_action = np.asarray(cont_action, dtype=float)
+    distances = np.linalg.norm(ACTION_LIBRARY - cont_action, axis=1)
     return int(np.argmin(distances))
 
 
@@ -297,8 +289,10 @@ def lock_blue_target(uav, bf):
     return candidates[0].id if candidates else -1
 
 
-def make_basic_decision_for_blue_team(bf):
+def make_basic_decision_for_blue_team(bf, return_attackers=False, return_targets=False):
     blue_actions = {}
+    attack_agent_ids = set()
+    attack_targets = {}
     for blue in bf.blue_uav:
         if not blue.alive:
             continue
@@ -307,12 +301,19 @@ def make_basic_decision_for_blue_team(bf):
             blue_actions[f"blue_{blue.id}"] = 0
             continue
         cont_action = pursuit_script_action(blue, candidates[0])
-        blue_actions[f"blue_{blue.id}"] = select_discrete_action(cont_action)
-    return blue_actions
+        agent_id = f"blue_{blue.id}"
+        blue_actions[agent_id] = select_discrete_action(cont_action)
+        attack_agent_ids.add(agent_id)
+        attack_targets[agent_id] = candidates[0].id
+    if return_targets:
+        return blue_actions, attack_agent_ids, attack_targets
+    return (blue_actions, attack_agent_ids) if return_attackers else blue_actions
 
 
-def make_improved_decision_for_blue_team(bf):
+def make_improved_decision_for_blue_team(bf, return_attackers=False, return_targets=False):
     blue_actions = {}
+    attack_agent_ids = set()
+    attack_targets = {}
     assigned_counts = {}
     alive_blues = [blue for blue in bf.blue_uav if blue.alive]
 
@@ -334,16 +335,25 @@ def make_improved_decision_for_blue_team(bf):
             continue
 
         cont_action = pursuit_script_action(blue, target)
-        blue_actions[f"blue_{blue.id}"] = select_discrete_action(cont_action)
+        agent_id = f"blue_{blue.id}"
+        blue_actions[agent_id] = select_discrete_action(cont_action)
+        attack_agent_ids.add(agent_id)
+        attack_targets[agent_id] = target.id
         assigned_counts[target.id] = assigned_counts.get(target.id, 0) + 1
 
-    return blue_actions
+    if return_targets:
+        return blue_actions, attack_agent_ids, attack_targets
+    return (blue_actions, attack_agent_ids) if return_attackers else blue_actions
 
 
-def make_decision_for_blue_team(bf):
+def make_decision_for_blue_team(bf, return_attackers=False, return_targets=False):
     if BlueScriptConfig.get("use_improved_blue_script", True):
-        return make_improved_decision_for_blue_team(bf)
-    return make_basic_decision_for_blue_team(bf)
+        return make_improved_decision_for_blue_team(
+            bf, return_attackers=return_attackers, return_targets=return_targets
+        )
+    return make_basic_decision_for_blue_team(
+        bf, return_attackers=return_attackers, return_targets=return_targets
+    )
 
 
 def make_decision_for_red_team(bf):

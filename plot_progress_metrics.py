@@ -16,6 +16,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from exp_article_test.maneuver import ACTION_COUNT
+
 
 METRICS = [
     ("episode_reward_mean", "Episode Reward Mean"),
@@ -32,7 +34,7 @@ ATTACK_RATIO_KEY = "custom_metrics/log_attack_ratio_mean"
 EVADE_RATIO_KEY = "custom_metrics/log_evade_ratio_mean"
 LOW_LEVEL_ACTION_KEYS = [
     f"custom_metrics/log_low_action_{action_id:02d}_ratio_mean"
-    for action_id in range(15)
+    for action_id in range(ACTION_COUNT)
 ]
 LOW_LEVEL_ACTION_LABELS = [
     "0 const level",
@@ -195,10 +197,12 @@ def plot_high_level_decisions(progress_csv: Path, output_path: Path, final_windo
 def plot_low_level_actions(progress_csv: Path, output_path: Path, final_window: int = 10) -> Path | None:
     x_values, metric_values = load_progress(progress_csv)
     action_values = []
-    for key in LOW_LEVEL_ACTION_KEYS:
+    action_ids = []
+    for action_id, key in enumerate(LOW_LEVEL_ACTION_KEYS):
         values = metric_values.get(key, [])
         if not any(value is not None for value in values):
-            return None
+            continue
+        action_ids.append(action_id)
         action_values.append([0.0 if value is None else value for value in values])
 
     if not action_values:
@@ -229,18 +233,33 @@ def plot_low_level_actions(progress_csv: Path, output_path: Path, final_window: 
     tick_indices = np.linspace(0, len(x_values) - 1, tick_count, dtype=int)
     axes[0].set_xticks(tick_indices)
     axes[0].set_xticklabels([str(x_values[idx]) for idx in tick_indices], rotation=35, ha="right")
-    axes[0].set_yticks(range(15))
-    axes[0].set_yticklabels([str(i) for i in range(15)])
+    y_indices = np.linspace(0, len(action_ids) - 1, min(15, len(action_ids)), dtype=int)
+    axes[0].set_yticks(y_indices)
+    axes[0].set_yticklabels([str(action_ids[index]) for index in y_indices])
     fig.colorbar(im, ax=axes[0], fraction=0.046, pad=0.04, label="Action Ratio")
 
-    bars = axes[1].bar(range(15), final_values, color="#d62728", alpha=0.86)
-    axes[1].set_title(f"Final {window}-Iter Low-Level Action Distribution")
+    selected = np.arange(len(action_ids))
+    if len(selected) > 15:
+        selected = np.sort(np.argsort(final_values)[-15:])
+    plotted_values = final_values[selected]
+    plotted_ids = [action_ids[index] for index in selected]
+    bars = axes[1].bar(range(len(selected)), plotted_values, color="#d62728", alpha=0.86)
+    axes[1].set_title(f"Final {window}-Iter Top {len(selected)} Low-Level Actions")
     axes[1].set_ylabel("Ratio")
     axes[1].set_ylim(0.0, max(0.1, float(final_values.max()) * 1.18))
-    axes[1].set_xticks(range(15))
-    axes[1].set_xticklabels(LOW_LEVEL_ACTION_LABELS, rotation=45, ha="right")
+    axes[1].set_xticks(range(len(selected)))
+    axes[1].set_xticklabels(
+        [
+            LOW_LEVEL_ACTION_LABELS[action_id]
+            if len(action_ids) == 15 and action_id < len(LOW_LEVEL_ACTION_LABELS)
+            else str(action_id)
+            for action_id in plotted_ids
+        ],
+        rotation=45,
+        ha="right",
+    )
     axes[1].grid(True, axis="y", alpha=0.28)
-    for bar, value in zip(bars, final_values):
+    for bar, value in zip(bars, plotted_values):
         if value <= 0:
             continue
         axes[1].text(
@@ -289,7 +308,7 @@ def main():
         "--low-action-output",
         type=Path,
         default=None,
-        help="Optional output path for the low-level 15-action distribution figure.",
+        help="Optional output path for the low-level action distribution figure.",
     )
     args = parser.parse_args()
 

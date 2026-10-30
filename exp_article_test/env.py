@@ -25,6 +25,8 @@ class BattleEnv(MultiAgentEnv):
         self.use_blue_script = env_config.get("use_blue_script", True)
         self.use_script_low_level = env_config.get("use_script_low_level", HRLConfig["use_script_low_level"])
         self.low_level_policy_dir = env_config.get("low_level_policy_dir", HRLConfig["low_level_policy_dir"])
+        self.blue_low_level_policy_dir = env_config.get("blue_low_level_policy_dir")
+        self.blue_high_level_sub_steps = env_config.get("blue_high_level_sub_steps", 1)
         self.freeze_low_level = env_config.get("freeze_low_level", HRLConfig["freeze_low_level"])
         self.blue_policy_mode = env_config.get("blue_policy_mode", "script")
         self.blue_opponent_checkpoint = env_config.get("blue_opponent_checkpoint", None)
@@ -46,6 +48,8 @@ class BattleEnv(MultiAgentEnv):
             use_blue_script=self.use_blue_script,
             use_script_low_level=self.use_script_low_level,
             low_level_policy_dir=self.low_level_policy_dir,
+            blue_low_level_policy_dir=self.blue_low_level_policy_dir,
+            blue_high_level_sub_steps=self.blue_high_level_sub_steps,
             freeze_low_level=self.freeze_low_level,
             blue_policy_mode=self.blue_policy_mode,
             blue_opponent_checkpoint=self.blue_opponent_checkpoint,

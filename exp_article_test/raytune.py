@@ -25,6 +25,7 @@ from exp_article_test.config import (
 )
 from exp_article_test.env import BattleEnv
 from exp_article_test.low_level_env import LowLevelBattleEnv
+from exp_article_test.maneuver import ACTION_COUNT
 from exp_article_test.self_play import load_opponent_pool, register_opponent_checkpoint, reset_opponent_pool
 
 try:
@@ -37,7 +38,7 @@ except ModuleNotFoundError:
 
 LOW_LEVEL_ACTION_RATIO_COLUMNS = [
     f"custom_metrics/log_low_action_{action_id:02d}_ratio_mean"
-    for action_id in range(15)
+    for action_id in range(ACTION_COUNT)
 ]
 
 
@@ -103,6 +104,8 @@ def _build_env_config(
     opponent_pool_dir=None,
     opponent_sample_mode=None,
     fallback_to_script=None,
+    blue_low_level_policy_dir=None,
+    blue_high_level_sub_steps=1,
 ):
     return {
         "num_red": num_red,
@@ -114,6 +117,8 @@ def _build_env_config(
             HRLConfig["use_script_low_level"] if use_script_low_level is None else use_script_low_level
         ),
         "low_level_policy_dir": low_level_policy_dir or HRLConfig["low_level_policy_dir"],
+        "blue_low_level_policy_dir": blue_low_level_policy_dir,
+        "blue_high_level_sub_steps": blue_high_level_sub_steps,
         "freeze_low_level": HRLConfig["freeze_low_level"],
         "blue_policy_mode": blue_policy_mode,
         "blue_opponent_checkpoint": blue_opponent_checkpoint,
@@ -125,12 +130,20 @@ def _build_env_config(
     }
 
 
-def _build_low_level_env_config(mode, num_red, num_blue, use_blue_script=True):
+def _build_low_level_env_config(
+    mode, num_red, num_blue, use_blue_script=True,
+    blue_policy_mode="script", blue_opponent_checkpoint=None, blue_low_level_policy_dir=None,
+    blue_high_level_sub_steps=1,
+):
     return {
         "mode": mode,
         "num_red": num_red,
         "num_blue": num_blue,
         "use_blue_script": use_blue_script,
+        "blue_policy_mode": blue_policy_mode,
+        "blue_opponent_checkpoint": blue_opponent_checkpoint,
+        "blue_low_level_policy_dir": blue_low_level_policy_dir,
+        "blue_high_level_sub_steps": blue_high_level_sub_steps,
         "threat_count": LowLevelConfig["threat_count"],
     }
 
@@ -433,11 +446,14 @@ def _run_fixed_benchmark_after_training(run_dir, env_config, baseline_checkpoint
             seed=FixedEvaluationConfig["seed"],
             num_red=env_config.get("num_red", HRLConfig["start_train_num_red"]),
             num_blue=env_config.get("num_blue", HRLConfig["start_train_num_blue"]),
+            sub_steps=env_config.get("sub_steps", HRLConfig["sub_steps"]),
             opponents=tuple(FixedEvaluationConfig["opponents"]),
             use_trained_low_level=not env_config.get(
                 "use_script_low_level", HRLConfig["use_script_low_level"]
             ),
             low_level_policy_dir=env_config.get("low_level_policy_dir"),
+            blue_low_level_policy_dir=env_config.get("blue_low_level_policy_dir"),
+            blue_high_level_sub_steps=env_config.get("blue_high_level_sub_steps", 1),
         )
     except Exception as exc:
         print(f"固定基准评估失败，训练结果仍已保留: {exc}")
@@ -554,7 +570,12 @@ def _register_self_play_snapshot(checkpoint_path, pool_dir, iteration):
     return registered_path
 
 
-def train_hier_v1(seed, num_cpus, num_gpus, num_env_runners, use_script_low_level=None, low_level_policy_dir=None):
+def train_hier_v1(
+    seed, num_cpus, num_gpus, num_env_runners, use_script_low_level=None, low_level_policy_dir=None,
+    blue_policy_mode="script", blue_opponent_checkpoint=None, blue_low_level_policy_dir=None,
+    blue_high_level_sub_steps=1,
+    fallback_to_script=None,
+):
     import ray
 
     ray.shutdown()
@@ -567,6 +588,11 @@ def train_hier_v1(seed, num_cpus, num_gpus, num_env_runners, use_script_low_leve
         num_blue=HRLConfig["start_train_num_blue"],
         use_script_low_level=use_script_low_level,
         low_level_policy_dir=low_level_policy_dir,
+        blue_policy_mode=blue_policy_mode,
+        blue_opponent_checkpoint=blue_opponent_checkpoint,
+        blue_low_level_policy_dir=blue_low_level_policy_dir,
+        blue_high_level_sub_steps=blue_high_level_sub_steps,
+        fallback_to_script=fallback_to_script,
     )
     algo = _build_ppo_config(
         num_gpus=num_gpus,
@@ -584,6 +610,9 @@ def train_hier_v1(seed, num_cpus, num_gpus, num_env_runners, use_script_low_leve
                 checkpoint_frequency=RayCheckpointConfig["checkpoint_frequency"],
                 desc="High-Level PPO",
                 trajectory_env_config=env_config,
+                fixed_eval_baseline_checkpoint=(
+                    blue_opponent_checkpoint if blue_policy_mode == "history_policy" else None
+                ),
             )
         )
     finally:
@@ -786,7 +815,11 @@ def train_hier_self_play_from_checkpoint(
         ray.shutdown()
 
 
-def _train_low_level(mode, seed, num_cpus, num_gpus, num_env_runners):
+def _train_low_level(
+    mode, seed, num_cpus, num_gpus, num_env_runners,
+    blue_policy_mode="script", blue_opponent_checkpoint=None, blue_low_level_policy_dir=None,
+    blue_high_level_sub_steps=1,
+):
     import ray
 
     ray.shutdown()
@@ -799,6 +832,10 @@ def _train_low_level(mode, seed, num_cpus, num_gpus, num_env_runners):
         num_red=LowLevelConfig["start_train_num_red"],
         num_blue=LowLevelConfig["start_train_num_blue"],
         use_blue_script=True,
+        blue_policy_mode=blue_policy_mode,
+        blue_opponent_checkpoint=blue_opponent_checkpoint,
+        blue_low_level_policy_dir=blue_low_level_policy_dir,
+        blue_high_level_sub_steps=blue_high_level_sub_steps,
     )
     algo = _build_low_level_ppo_config(
         num_gpus=num_gpus,
@@ -822,23 +859,39 @@ def _train_low_level(mode, seed, num_cpus, num_gpus, num_env_runners):
         ray.shutdown()
 
 
-def train_low_level_attack(seed, num_cpus, num_gpus, num_env_runners):
+def train_low_level_attack(
+    seed, num_cpus, num_gpus, num_env_runners,
+    blue_policy_mode="script", blue_opponent_checkpoint=None, blue_low_level_policy_dir=None,
+    blue_high_level_sub_steps=1,
+):
     return _train_low_level(
         mode="attack",
         seed=seed,
         num_cpus=num_cpus,
         num_gpus=num_gpus,
         num_env_runners=num_env_runners,
+        blue_policy_mode=blue_policy_mode,
+        blue_opponent_checkpoint=blue_opponent_checkpoint,
+        blue_low_level_policy_dir=blue_low_level_policy_dir,
+        blue_high_level_sub_steps=blue_high_level_sub_steps,
     )
 
 
-def train_low_level_evade(seed, num_cpus, num_gpus, num_env_runners):
+def train_low_level_evade(
+    seed, num_cpus, num_gpus, num_env_runners,
+    blue_policy_mode="script", blue_opponent_checkpoint=None, blue_low_level_policy_dir=None,
+    blue_high_level_sub_steps=1,
+):
     return _train_low_level(
         mode="evade",
         seed=seed,
         num_cpus=num_cpus,
         num_gpus=num_gpus,
         num_env_runners=num_env_runners,
+        blue_policy_mode=blue_policy_mode,
+        blue_opponent_checkpoint=blue_opponent_checkpoint,
+        blue_low_level_policy_dir=blue_low_level_policy_dir,
+        blue_high_level_sub_steps=blue_high_level_sub_steps,
     )
 
 
@@ -951,7 +1004,7 @@ def smoke_test_low_level_env(mode, seed=0, num_red=1, num_blue=1, rollout_steps=
     for step_idx in range(rollout_steps):
         if not obs:
             break
-        actions = {agent_id: int(step_idx % 15) for agent_id in obs.keys()}
+        actions = {agent_id: int(step_idx % ACTION_COUNT) for agent_id in obs.keys()}
         obs, rewards, terminated, truncated, infos = env.step(actions)
         summary["steps"].append(
             {

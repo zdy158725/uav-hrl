@@ -66,17 +66,22 @@ def _build_eval_env(
     baseline_checkpoint: Path | None,
     num_red: int,
     num_blue: int,
+    sub_steps: int,
     use_script_low_level: bool,
     low_level_policy_dir: str | None,
+    blue_low_level_policy_dir: str | None = None,
+    blue_high_level_sub_steps: int = 1,
 ) -> BattleEnv:
     env_config = {
         "num_red": num_red,
         "num_blue": num_blue,
         "candidate_enemy_count": HRLConfig["candidate_enemy_count"],
-        "sub_steps": HRLConfig["sub_steps"],
+        "sub_steps": sub_steps,
         "use_blue_script": True,
         "use_script_low_level": use_script_low_level,
         "low_level_policy_dir": low_level_policy_dir or HRLConfig["low_level_policy_dir"],
+        "blue_low_level_policy_dir": blue_low_level_policy_dir,
+        "blue_high_level_sub_steps": blue_high_level_sub_steps,
         "freeze_low_level": True,
         "blue_policy_mode": "script" if opponent_mode == "script" else "history_policy",
         "blue_opponent_checkpoint": (
@@ -203,20 +208,20 @@ def _plot_single_checkpoint_summary(rows: list[dict], output_path: Path) -> None
 
     raw_win = np.asarray([row["red_win_rate"] for row in ordered], dtype=float)
     no_draw_win = np.asarray([row["red_win_rate_no_draw"] for row in ordered], dtype=float)
-    raw_error = np.asarray(
+    raw_error = np.maximum(0.0, np.asarray(
         [
             raw_win - np.asarray([row["red_win_ci95_low"] for row in ordered], dtype=float),
             np.asarray([row["red_win_ci95_high"] for row in ordered], dtype=float) - raw_win,
         ]
-    )
-    no_draw_error = np.asarray(
+    ))
+    no_draw_error = np.maximum(0.0, np.asarray(
         [
             no_draw_win
             - np.asarray([row["red_win_no_draw_ci95_low"] for row in ordered], dtype=float),
             np.asarray([row["red_win_no_draw_ci95_high"] for row in ordered], dtype=float)
             - no_draw_win,
         ]
-    )
+    ))
     raw_bars = axes[0].bar(
         x - width / 2,
         raw_win,
@@ -406,8 +411,11 @@ def evaluate(args: argparse.Namespace) -> Path:
                 baseline_checkpoint=baseline_checkpoint,
                 num_red=args.num_red,
                 num_blue=args.num_blue,
+                sub_steps=args.sub_steps,
                 use_script_low_level=not args.use_trained_low_level,
                 low_level_policy_dir=args.low_level_policy_dir,
+                blue_low_level_policy_dir=getattr(args, "blue_low_level_policy_dir", None),
+                blue_high_level_sub_steps=getattr(args, "blue_high_level_sub_steps", 1),
             )
             rows = []
             for episode_index, seed in enumerate(seeds, start=1):
@@ -452,6 +460,9 @@ def evaluate_fixed_checkpoints(
     opponents: tuple[str, ...] = ("script", "initial_policy"),
     use_trained_low_level: bool = False,
     low_level_policy_dir: str | None = None,
+    sub_steps: int = 10,
+    blue_low_level_policy_dir: str | None = None,
+    blue_high_level_sub_steps: int = 1,
 ) -> Path:
     """Programmatic entry point used by the high-level training loop."""
     args = argparse.Namespace(
@@ -464,8 +475,11 @@ def evaluate_fixed_checkpoints(
         seed=int(seed),
         num_red=int(num_red),
         num_blue=int(num_blue),
+        sub_steps=int(sub_steps),
         use_trained_low_level=bool(use_trained_low_level),
         low_level_policy_dir=low_level_policy_dir,
+        blue_low_level_policy_dir=blue_low_level_policy_dir,
+        blue_high_level_sub_steps=int(blue_high_level_sub_steps),
         output_dir=Path(output_dir),
     )
     return evaluate(args)
@@ -487,7 +501,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260625)
     parser.add_argument("--num-red", type=int, default=3)
     parser.add_argument("--num-blue", type=int, default=3)
+    parser.add_argument("--sub-steps", type=int, default=10)
     parser.add_argument("--use-trained-low-level", action="store_true")
+    parser.add_argument("--blue-low-level-policy-dir", type=str, default=None)
+    parser.add_argument("--blue-high-level-sub-steps", type=int, default=1)
     parser.add_argument("--low-level-policy-dir", type=str, default=None)
     parser.add_argument(
         "--output-dir",

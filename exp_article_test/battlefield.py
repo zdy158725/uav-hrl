@@ -27,6 +27,12 @@ class BattleField:
         self.max_simulation_time = self.config["max_simulation_time"]
         self.decision_sep = self.config["decision_separation"]
         self.crash_distance = self.config["crash_distance"]
+        self.fire_cooldown_seconds = float(self.config["fire_cooldown_seconds"])
+        if self.fire_cooldown_seconds < 0.0:
+            raise ValueError("fire_cooldown_seconds must be non-negative")
+        self.evade_damage_multiplier = float(self.config["evade_damage_multiplier"])
+        if not 0.0 <= self.evade_damage_multiplier <= 1.0:
+            raise ValueError("evade_damage_multiplier must be between 0 and 1")
         self.boundary_x_min = self.config["boundary_x_min"]
         self.boundary_x_max = self.config["boundary_x_max"]
         self.boundary_y_min = self.config["boundary_y_min"]
@@ -36,11 +42,13 @@ class BattleField:
 
         self.record = {}
         self.last_record = {}
+        self.last_damage_time = {}
         self.battlefield_done = {}
         self.battlefield_info = "continue"
 
     def reset(self):
         self.t = 0
+        self.last_damage_time = {}
         self.reset_record()
         self.num_red_alive = self.num_red
         self.num_blue_alive = self.num_blue
@@ -87,8 +95,13 @@ class BattleField:
                'Blue': self.generate_coordinates(self.num_blue, 9000, 11000, 7000, 9000, -5000, -4000)}
         return pos
 
-    def step(self, red_actions, blue_actions):
+    def step(self, red_actions, blue_actions, *, attack_agent_ids, attack_targets):
         self.last_record = deepcopy(self.record)
+        attack_agent_ids = frozenset(attack_agent_ids)
+        attack_targets = dict(attack_targets)
+        for uav in itertools.chain(self.red_uav, self.blue_uav):
+            self.record[uav.team][uav.id]['damage'] = 0.0
+            self.record[uav.team][uav.id]['hurt'] = 0.0
         for _ in range(self.decision_sep):
             self.t += self.dt
             for red in self.red_uav:
@@ -111,7 +124,7 @@ class BattleField:
                 self.record["Blue"][blue.id]["action_index"] = action_index
                 real_action = convert_to_contol_input(action_index)
                 blue.step(real_action)
-            self.check_after_step()
+            self.check_after_step(attack_agent_ids, attack_targets)
         self.check_winner()
 
     def reset_record(self):
@@ -145,79 +158,58 @@ class BattleField:
         self.record['n_alive_blue'] = self.num_blue
         self.last_record = deepcopy(self.record)
 
-    def check_after_step(self):
+    def check_after_step(self, attack_agent_ids, attack_targets):
         self.check_out()
         self.check_crash()
-        for uav in itertools.chain(self.red_uav, self.blue_uav):
-            if not uav.alive:
+        alive_uavs = [uav for uav in itertools.chain(self.red_uav, self.blue_uav) if uav.alive]
+
+        # Determine every attack from the same pre-damage state. A target that is
+        # destroyed this tick must still be able to complete its own attack.
+        pending_hits = []
+        pending_damage = {}
+        for uav in alive_uavs:
+            agent_id = f"{uav.team.lower()}_{uav.id}"
+            if agent_id not in attack_agent_ids:
                 continue
-            self.check_damage(uav)
-        for uav in itertools.chain(self.red_uav, self.blue_uav):
+            elapsed = self.t - self.last_damage_time.get(agent_id, float("-inf"))
+            if elapsed + 1e-9 < self.fire_cooldown_seconds:
+                continue
+            target_id = attack_targets[agent_id]
+            target, damage = self.check_damage(uav, attack_agent_ids, target_id)
+            if target is None:
+                continue
+            pending_hits.append((uav, target, damage))
+            pending_damage[target] = pending_damage.get(target, 0.0) + damage
+
+        for target, damage in pending_damage.items():
+            target.blood -= damage
+        for attacker, target, damage in pending_hits:
+            attacker.set_target(target.id)
+            self.last_damage_time[f"{attacker.team.lower()}_{attacker.id}"] = self.t
+            self.record[attacker.team][attacker.id]['damage'] += damage
+            self.record[attacker.team][attacker.id]['target_blood'] = max(0.0, target.blood)
+            self.record[target.team][target.id]['hurt'] += damage
+        for target in pending_damage:
+            if target.blood <= 0.0:
+                target.destroy("hit")
+
+        for uav in alive_uavs:
             if uav.alive:
                 uav.record_status()
 
-    # def check_damage(self, uav):
-    #     current_damage = 0.0
-    #     target_id = None
-    #     if uav.team == "Red":
-    #         target_team = self.blue_uav
-    #     else:
-    #         target_team = self.red_uav
-    #     for target in target_team:
-    #         if not target.alive:
-    #             continue
-    #         damage = self.cal_damage(uav, target)
-    #         if damage > current_damage:
-    #             current_damage = damage
-    #     if target_id is not None:
-    #         uav.set_target(target_id)
-    #         target = target_team[int(target_id)]
-    #         if uav.team == "Red":
-    #             current_damage *= 2.5
-    #         else:
-    #             current_damage *= 0.8
-    #         target.blood -= current_damage
-    #         if target.blood < 0.0:
-    #             target.destroy("hit")
-    #         self.record[uav.team][uav.id]['target_blood'] = target.blood
-    #         self.record[uav.team][uav.id]['damage'] = current_damage
-    #         self.record[target.team][target.id]['hurt'] = current_damage
-#baixiaoxiao
-    def check_damage(self, uav):
-        # 1) 选出当前时刻最该打的人（伤害最大的那个）
-        best_damage = 0.0
-        best_target = None
-
+    def check_damage(self, uav, attack_agent_ids, target_id):
+        """只计算指定敌机的伤害，不在遍历期间修改飞机状态。"""
         target_team = self.blue_uav if uav.team == "Red" else self.red_uav
-        for target in target_team:
-            if not target.alive:
-                continue
-            d = self.cal_damage(uav, target)
-            if d > best_damage:
-                best_damage = d
-                best_target = target  # ← 关键：把目标记下来
+        target = next((enemy for enemy in target_team if enemy.id == str(target_id) and enemy.alive), None)
+        if target is None:
+            return None, 0.0
 
-        # 2) 没有命中任何目标就退出，并把本机当步伤害清零（避免残留旧值）
-        if best_target is None or best_damage <= 0.0:
-            self.record[uav.team][uav.id]['damage'] = 0.0
-            return
-
-        # 3) 伤害系数。当前保持红蓝 1:1，避免胜率受阵营伤害倍率影响。
-        if uav.team == "Red":
-            best_damage *= 1.0
-        else:
-            best_damage *= 1.0
-
-        # 4) 结算到被打的那架机上
-        uav.set_target(best_target.id)
-        best_target.blood -= best_damage
-        if best_target.blood <= 0.0:
-            best_target.destroy("hit")
-
-        # 5) 记录双方账本（供奖励函数使用）
-        self.record[uav.team][uav.id]['target_blood'] = max(0.0, best_target.blood)
-        self.record[uav.team][uav.id]['damage'] = best_damage
-        self.record[best_target.team][best_target.id]['hurt'] = best_damage
+        damage = self.cal_damage(uav, target)
+        if f"{target.team.lower()}_{target.id}" not in attack_agent_ids:
+            damage *= self.evade_damage_multiplier
+        if damage <= 0.0:
+            return None, 0.0
+        return target, damage
 
     def cal_damage(self, uav, target):
         rel_pos = target.pos - uav.pos
