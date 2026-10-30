@@ -1,0 +1,1 @@
+{"type": "Algorithm", "checkpoint_version": "1.1", "format": "cloudpickle", "state_file": "/mnt/disk2/zdy_documents/air_combat_scene/uav_hrl/outputs/checkpoints/PPO_SELF_PLAY_WARM_2026-06-25_17-52-01/checkpoint_000140/algorithm_state.pkl", "policy_ids": ["red_policy"], "ray_version": "2.4.0", "ray_commit": "4479f66d4db967d3c9dd0af2572061276ba926ba"}
